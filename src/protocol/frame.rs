@@ -6,6 +6,7 @@ pub enum Frame {
   Error(String),
   Integer(i64),
   Bulk(Bytes),
-  Null,
+  NullBulk,
+  NullArray,
   Array(Vec<Frame>),
 }

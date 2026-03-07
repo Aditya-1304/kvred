@@ -8,21 +8,32 @@ pub enum DecodeError {
   InvalidSimpleString,
   InvalidInteger,
   InvalidErrorString,
-  InvalidBulkString
-
+  InvalidBulkString,
+  InvalidArray,
 }
 
+
 pub fn decode(buffer: &mut BytesMut) -> Result<Option<Frame>, DecodeError> {
+  let Some((frame, used)) = parse_frame(&buffer[..])? else {
+    return Ok(None);
+  };
+
+  buffer.advance(used);
+  Ok(Some(frame))
+}
+
+fn parse_frame(buffer: &[u8]) -> Result<Option<(Frame, usize)>, DecodeError> {
   if buffer.is_empty() {
     return Ok(None);
   }
 
   match buffer[0] {
-      b'+' => decode_simple_string(buffer),
-      b':' => decode_integer(buffer),
-      b'-' => decode_error_string(buffer),
-      b'$' => decode_bulk_string(buffer),
-      other => Err(DecodeError::InvalidPrefix(other)),
+    b'+' => parse_simple_string(buffer),
+    b'-' => parse_error_string(buffer),
+    b':' => parse_integer(buffer),
+    b'$' => parse_bulk_string(buffer),
+    b'*' => parse_array(buffer),
+    other => Err(DecodeError::InvalidPrefix(other)),
   }
 }
 
@@ -33,7 +44,7 @@ pub fn find_crlf(buffer: &[u8], start: usize) -> Option<usize> {
     .map(|pos| start + pos)
 }
 
-pub fn decode_simple_string(buffer: &mut BytesMut) -> Result<Option<Frame>, DecodeError> {
+pub fn parse_simple_string(buffer: &[u8]) -> Result<Option<(Frame, usize)>, DecodeError> {
   let end = match find_crlf(buffer, 1) {
       Some(end) => end,
       None => return Ok(None)
@@ -49,11 +60,10 @@ pub fn decode_simple_string(buffer: &mut BytesMut) -> Result<Option<Frame>, Deco
     .map_err(|_| DecodeError::InvalidSimpleString)?
     .to_owned();
 
-  buffer.advance(end + 2); 
-  Ok(Some(Frame::Simple(value)))
+  Ok(Some((Frame::Simple(value), end + 2)))
 }
 
-pub fn decode_error_string(buffer: &mut BytesMut) -> Result<Option<Frame>, DecodeError> {
+pub fn parse_error_string(buffer: &[u8]) -> Result<Option<(Frame, usize)>, DecodeError> {
   let end = match find_crlf(buffer, 1) {
       Some(end) => end,
       None => return Ok(None)
@@ -69,11 +79,10 @@ pub fn decode_error_string(buffer: &mut BytesMut) -> Result<Option<Frame>, Decod
     .map_err(|_| DecodeError::InvalidErrorString)?
     .to_owned();
 
-  buffer.advance(end + 2);
-  Ok(Some(Frame::Error(value)))
+  Ok(Some((Frame::Error(value), end + 2)))
 }
 
-pub fn decode_integer(buffer: &mut BytesMut) -> Result<Option<Frame>, DecodeError> {
+pub fn parse_integer(buffer: &[u8]) -> Result<Option<(Frame, usize)>, DecodeError> {
   let end = match find_crlf(buffer, 1) {
       Some(end) => end,
       None => return Ok(None)
@@ -90,11 +99,11 @@ pub fn decode_integer(buffer: &mut BytesMut) -> Result<Option<Frame>, DecodeErro
     .parse::<i64>()
     .map_err(|_| DecodeError::InvalidInteger)?;
 
-  buffer.advance(end + 2);
-  Ok(Some(Frame::Integer(value)))
+
+  Ok(Some((Frame::Integer(value), end + 2)))
 } 
 
-pub fn decode_bulk_string(buffer: &mut BytesMut) -> Result<Option<Frame>, DecodeError> {
+pub fn parse_bulk_string(buffer: &[u8]) -> Result<Option<(Frame, usize)>, DecodeError> {
   let first_crlf = match find_crlf(buffer, 1) {
     Some(end) => end,
     None => return Ok(None),
@@ -106,8 +115,7 @@ pub fn decode_bulk_string(buffer: &mut BytesMut) -> Result<Option<Frame>, Decode
     .map_err(|_| DecodeError::InvalidBulkString)?;
 
   if len == -1 {
-    buffer.advance(first_crlf + 2);
-    return Ok(Some(Frame::Null));
+    return Ok(Some((Frame::NullBulk, first_crlf + 2)));
   }
 
   if len < -1 {
@@ -130,9 +138,43 @@ pub fn decode_bulk_string(buffer: &mut BytesMut) -> Result<Option<Frame>, Decode
 
   let value = Bytes::copy_from_slice(&buffer[payload_start..payload_end]);
 
-  buffer.advance(frame_end);
-  Ok(Some(Frame::Bulk(value)))
+  Ok(Some((Frame::Bulk(value), frame_end)))
 
+}
+
+pub fn parse_array(buffer: &[u8]) -> Result<Option<(Frame, usize)>, DecodeError> {
+  let header_end = match find_crlf(buffer, 1) {
+      Some(end) => end,
+      None => return Ok(None),
+  };
+
+  let len = str::from_utf8(&buffer[1..header_end])
+    .map_err(|_| DecodeError::InvalidArray)?
+    .parse::<i64>()
+    .map_err(|_| DecodeError::InvalidArray)?;
+
+  if len == -1 {
+    return Ok(Some((Frame::NullArray, header_end + 2)));
+  }
+
+  if len < -1 {
+    return Err(DecodeError::InvalidArray);
+  }
+
+  let len = len as usize;
+  let mut items = Vec::with_capacity(len);
+  let mut used = header_end + 2;
+
+  for _ in 0..len {
+    let Some((frame, consumed)) = parse_frame(&buffer[used..])? else {
+      return Ok(None);
+    };
+
+    items.push(frame);
+    used += consumed;
+  }
+
+  Ok(Some((Frame::Array(items), used)))
 }
 
 
@@ -291,7 +333,7 @@ mod test {
     let mut buffer = BytesMut::from(&b"$-1\r\n"[..]);
     let frame = decode(&mut buffer).unwrap();
 
-    assert_eq!(frame, Some(Frame::Null));
+    assert_eq!(frame, Some(Frame::NullBulk));
     assert!(buffer.is_empty());
   }
 
@@ -346,5 +388,160 @@ mod test {
     assert!(matches!(result, Err(DecodeError::InvalidBulkString)));
   }
 
+  #[test]
+  fn array_decodes_empty() {
+    let mut buffer = BytesMut::from(&b"*0\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(frame, Some(Frame::Array(vec![])));
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_decodes_bulk_strings() {
+    let mut buffer = BytesMut::from(&b"*2\r\n$5\r\nhello\r\n$5\r\nworld\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(
+      frame,
+      Some(Frame::Array(vec![
+        Frame::Bulk(Bytes::from_static(b"hello")),
+        Frame::Bulk(Bytes::from_static(b"world")),
+      ]))
+    );
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_decodes_integers() {
+    let mut buffer = BytesMut::from(&b"*3\r\n:1\r\n:2\r\n:3\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(
+      frame,
+      Some(Frame::Array(vec![
+        Frame::Integer(1),
+        Frame::Integer(2),
+        Frame::Integer(3),
+      ]))
+    );
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_decodes_mixed_frames() {
+    let mut buffer = BytesMut::from(&b"*5\r\n:1\r\n:2\r\n:3\r\n:4\r\n$5\r\nhello\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(
+      frame,
+      Some(Frame::Array(vec![
+        Frame::Integer(1),
+        Frame::Integer(2),
+        Frame::Integer(3),
+        Frame::Integer(4),
+        Frame::Bulk(Bytes::from_static(b"hello")),
+      ]))
+    );
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_decodes_nested_arrays() {
+    let mut buffer = BytesMut::from(
+        &b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Hello\r\n-World\r\n"[..],
+    );
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(
+      frame,
+      Some(Frame::Array(vec![
+        Frame::Array(vec![
+          Frame::Integer(1),
+          Frame::Integer(2),
+          Frame::Integer(3),
+        ]),
+        Frame::Array(vec![
+          Frame::Simple("Hello".to_owned()),
+          Frame::Error("World".to_owned()),
+        ]),
+      ]))
+    );
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_decodes_null_array() {
+    let mut buffer = BytesMut::from(&b"*-1\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(frame, Some(Frame::NullArray));
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_decodes_with_null_bulk_element() {
+    let mut buffer = BytesMut::from(&b"*3\r\n$5\r\nhello\r\n$-1\r\n$5\r\nworld\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(
+      frame,
+      Some(Frame::Array(vec![
+        Frame::Bulk(Bytes::from_static(b"hello")),
+        Frame::NullBulk,
+        Frame::Bulk(Bytes::from_static(b"world")),
+      ]))
+    );
+    assert!(buffer.is_empty());
+  }
+
+  #[test]
+  fn array_returns_none_on_partial_header() {
+    let mut buffer = BytesMut::from(&b"*2\r"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(frame, None);
+    assert_eq!(&buffer[..], b"*2\r");
+  }
+
+  #[test]
+  fn array_returns_none_on_partial_nested_frame() {
+    let mut buffer = BytesMut::from(&b"*2\r\n+OK\r\n$5\r\nhe"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(frame, None);
+    assert_eq!(&buffer[..], b"*2\r\n+OK\r\n$5\r\nhe");
+  }
+
+  #[test]
+  fn array_leaves_remaining_bytes() {
+    let mut buffer = BytesMut::from(&b"*2\r\n:1\r\n:2\r\n+OK\r\n"[..]);
+    let frame = decode(&mut buffer).unwrap();
+
+    assert_eq!(
+      frame,
+      Some(Frame::Array(vec![
+        Frame::Integer(1),
+        Frame::Integer(2),
+      ]))
+    );
+    assert_eq!(&buffer[..], b"+OK\r\n");
+  }
+
+  #[test]
+  fn array_rejects_invalid_length() {
+    let mut buffer = BytesMut::from(&b"*abc\r\n"[..]);
+    let result = decode(&mut buffer);
+
+    assert!(matches!(result, Err(DecodeError::InvalidArray)));
+  }
+
+  #[test]
+  fn array_rejects_negative_length_below_minus_one() {
+    let mut buffer = BytesMut::from(&b"*-2\r\n"[..]);
+    let result = decode(&mut buffer);
+
+    assert!(matches!(result, Err(DecodeError::InvalidArray)));
+  }
 
 }
