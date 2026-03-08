@@ -1,6 +1,7 @@
 use bytes::Bytes;
 
 pub mod parse;
+pub mod exec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
