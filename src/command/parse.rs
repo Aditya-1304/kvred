@@ -187,4 +187,219 @@ mod tests {
 
     assert_eq!(command, Command::Ping(None));
   }
+
+  #[test]
+  fn parses_get() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"GET")),
+      Frame::Bulk(Bytes::from_static(b"mykey")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(command, Command::Get { key: Bytes::from_static(b"mykey") });
+  }
+
+  #[test]
+  fn rejects_get_without_key() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"GET")),
+    ]);
+
+    let result = parse(frame);
+
+    assert!(matches!(result, Err(ParseError::WrongArity)));
+  }
+
+  #[test]
+  fn rejects_get_with_too_many_args() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"GET")),
+      Frame::Bulk(Bytes::from_static(b"k1")),
+      Frame::Bulk(Bytes::from_static(b"k2")),
+    ]);
+
+    let result = parse(frame);
+
+    assert!(matches!(result, Err(ParseError::WrongArity)));
+  }
+
+  #[test]
+  fn parses_get_case_insensitively() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"gEt")),
+      Frame::Bulk(Bytes::from_static(b"mykey")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(command, Command::Get { key: Bytes::from_static(b"mykey") });
+  }
+
+  #[test]
+  fn parses_set() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"SET")),
+      Frame::Bulk(Bytes::from_static(b"mykey")),
+      Frame::Bulk(Bytes::from_static(b"myvalue")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(
+      command,
+      Command::Set {
+        key: Bytes::from_static(b"mykey"),
+        value: Bytes::from_static(b"myvalue"),
+      }
+    );
+  }
+
+  #[test]
+  fn rejects_set_without_value() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"SET")),
+      Frame::Bulk(Bytes::from_static(b"mykey")),
+    ]);
+
+    let result = parse(frame);
+
+    assert!(matches!(result, Err(ParseError::WrongArity)));
+  }
+
+  #[test]
+  fn rejects_set_with_too_many_args() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"SET")),
+      Frame::Bulk(Bytes::from_static(b"mykey")),
+      Frame::Bulk(Bytes::from_static(b"v1")),
+      Frame::Bulk(Bytes::from_static(b"v2")),
+    ]);
+
+    let result = parse(frame);
+
+    assert!(matches!(result, Err(ParseError::WrongArity)));
+  }
+
+  #[test]
+  fn parses_set_case_insensitively() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"sEt")),
+      Frame::Bulk(Bytes::from_static(b"mykey")),
+      Frame::Bulk(Bytes::from_static(b"myvalue")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(
+      command,
+      Command::Set {
+        key: Bytes::from_static(b"mykey"),
+        value: Bytes::from_static(b"myvalue"),
+      }
+    );
+  }
+
+  #[test]
+  fn parses_del_single_key() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"DEL")),
+      Frame::Bulk(Bytes::from_static(b"k1")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(command, Command::Del { keys: vec![Bytes::from_static(b"k1")] });
+  }
+
+  #[test]
+  fn parses_del_multiple_keys() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"DEL")),
+      Frame::Bulk(Bytes::from_static(b"k1")),
+      Frame::Bulk(Bytes::from_static(b"k2")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(
+      command,
+      Command::Del { keys: vec![Bytes::from_static(b"k1"), Bytes::from_static(b"k2")] }
+    );
+  }
+
+  #[test]
+  fn rejects_del_without_keys() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"DEL")),
+    ]);
+
+    let result = parse(frame);
+
+    assert!(matches!(result, Err(ParseError::WrongArity)));
+  }
+
+  #[test]
+  fn parses_del_case_insensitively() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"dEl")),
+      Frame::Bulk(Bytes::from_static(b"k1")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(command, Command::Del { keys: vec![Bytes::from_static(b"k1")] });
+  }
+
+  #[test]
+  fn parses_exists_single_key() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"EXISTS")),
+      Frame::Bulk(Bytes::from_static(b"k1")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(command, Command::Exists { keys: vec![Bytes::from_static(b"k1")] });
+  }
+
+  #[test]
+  fn parses_exists_multiple_keys() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"EXISTS")),
+      Frame::Bulk(Bytes::from_static(b"k1")),
+      Frame::Bulk(Bytes::from_static(b"k2")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(
+      command,
+      Command::Exists { keys: vec![Bytes::from_static(b"k1"), Bytes::from_static(b"k2")] }
+    );
+  }
+
+  #[test]
+  fn rejects_exists_without_keys() {
+    let frame = Frame::Array(vec![
+      Frame::Bulk(Bytes::from_static(b"EXISTS")),
+    ]);
+
+    let result = parse(frame);
+
+    assert!(matches!(result, Err(ParseError::WrongArity)));
+  }
+
+  #[test]
+  fn parses_exists_case_insensitively() {
+    let frame = Frame::Array(vec![
+        Frame::Bulk(Bytes::from_static(b"eXiStS")),
+        Frame::Bulk(Bytes::from_static(b"k1")),
+    ]);
+
+    let command = parse(frame).unwrap();
+
+    assert_eq!(command, Command::Exists { keys: vec![Bytes::from_static(b"k1")] });
+  }
+
 }
