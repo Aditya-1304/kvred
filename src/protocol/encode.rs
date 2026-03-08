@@ -56,7 +56,6 @@ pub fn encode(frame: &Frame, dest: &mut BytesMut) {
 
 #[cfg(test)]
 mod test {
-  
   use super::*;
   use bytes::Bytes;
 

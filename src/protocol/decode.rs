@@ -1,3 +1,6 @@
+//! decode.rs
+//! this file turns the raw RESP bytes into enum Frame values (basically decodes them)
+
 use bytes::{Buf, Bytes, BytesMut};
 use std::str;
 use crate::protocol::frame::Frame;
