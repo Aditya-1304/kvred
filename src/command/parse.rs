@@ -25,6 +25,10 @@ pub fn parse(frame: Frame) -> Result<Command, ParseError> {
     parse_get(parts)
   } else if command_name.eq_ignore_ascii_case("SET") {
     parse_set(parts)
+  } else if command_name.eq_ignore_ascii_case("DEL") {
+    parse_del(parts)
+  } else if command_name.eq_ignore_ascii_case("EXISTS") {
+    parse_exists(parts)
   } else {
     Err(ParseError::UnknownCommand)
   }
@@ -52,6 +56,20 @@ pub fn parse_set(parts: Vec<Bytes>) -> Result<Command, ParseError> {
         value: (parts[2].clone()) 
       }),
       _ => Err(ParseError::WrongArity),
+  }
+}
+
+pub fn parse_del(parts: Vec<Bytes>) -> Result<Command, ParseError> {
+  match parts.len() {
+    1 => Err(ParseError::WrongArity),
+    _ => Ok(Command::Del { keys: (parts[1..].to_vec()) })
+  }
+}
+
+pub fn parse_exists(parts: Vec<Bytes>) -> Result<Command, ParseError> {
+  match parts.len() {
+    1 => Err(ParseError::WrongArity),
+    _ => Ok(Command::Exists { keys: (parts[1..].to_vec()) })
   }
 }
 
