@@ -1,22 +1,44 @@
+use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+
 use bytes::{Bytes, BytesMut};
 use kvred::{
-  db::state::new_shared_db,
+  db::state::new_shared_store,
   protocol::{decode::decode, frame::Frame},
-  server::listener::run,
+  server::listener::{ serve},
 };
 use tokio::{
   io::{AsyncReadExt, AsyncWriteExt},
-  net::TcpStream,
+  net::{TcpListener, TcpStream},
   task::JoinHandle,
-  time::{sleep, Duration},
+  time::{Duration, sleep},
 };
 
-fn spawn_server(addr: &'static str) -> JoinHandle<()> {
-  let db = new_shared_db();
+fn temp_aof_path(name: &str) -> PathBuf {
+  let nanos = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .unwrap()
+    .as_nanos();
 
-  tokio::spawn(async move {
-    let _ = run(addr, db).await;
-  })
+  std::env::temp_dir().join(format!("kvred-{name}-{nanos}.aof"))
+}
+
+async fn spawn_server(name: &str) -> (String, JoinHandle<()>, PathBuf) {
+  let aof_path = temp_aof_path(name);
+  let store = new_shared_store(&aof_path).unwrap();
+
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap().to_string();
+
+  let handle = tokio::spawn(async move {
+    serve(listener, store).await.expect("server failed");
+  });
+
+  (addr, handle, aof_path)
+}
+
+async fn stop_server(handle: JoinHandle<()>) {
+  handle.abort();
+  let _ = handle.await;
 }
 
 async fn connect_with_retry(addr: &str) -> TcpStream {
@@ -51,57 +73,73 @@ async fn send_and_read(stream: &mut TcpStream, request: &[u8]) -> Frame {
 
 #[tokio::test]
 async fn ping_over_tcp() {
-  let addr = "127.0.0.1:6381";
-  let server = spawn_server(addr);
+  let (addr, server, _aof_path) = spawn_server("ping").await;
 
-  let mut stream = connect_with_retry(addr).await;
-
+  let mut stream = connect_with_retry(&addr).await;
   let frame = send_and_read(&mut stream, b"*1\r\n$4\r\nPING\r\n").await;
 
   assert_eq!(frame, Frame::Simple("PONG".to_owned()));
 
-  server.abort();
+  stop_server(server).await;
 }
 
 #[tokio::test]
 async fn set_then_get_over_tcp() {
-  let addr = "127.0.0.1:6382";
-  let server = spawn_server(addr);
+  let (addr, server, _aof_path) = spawn_server("set-get").await;
 
-  let mut stream = connect_with_retry(addr).await;
+  let mut stream = connect_with_retry(&addr).await;
 
   let set_reply = send_and_read(
-      &mut stream,
-      b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n",
+    &mut stream,
+    b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n",
   )
   .await;
 
   let get_reply = send_and_read(
-      &mut stream,
-      b"*2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n",
+    &mut stream,
+    b"*2\r\n$3\r\nGET\r\n$5\r\nmykey\r\n",
   )
   .await;
 
   assert_eq!(set_reply, Frame::Simple("OK".to_owned()));
   assert_eq!(get_reply, Frame::Bulk(Bytes::from_static(b"hello")));
 
-  server.abort();
+  stop_server(server).await;
 }
 
 #[tokio::test]
 async fn unknown_command_returns_error() {
-  let addr = "127.0.0.1:6383";
-  let server = spawn_server(addr);
+  let (addr, server, _aof_path) = spawn_server("unknown").await;
 
-  let mut stream = connect_with_retry(addr).await;
+  let mut stream = connect_with_retry(&addr).await;
 
-  let frame = send_and_read(
-      &mut stream,
-      b"*2\r\n$4\r\nINCR\r\n$1\r\nx\r\n",
-  )
-  .await;
+  let frame = send_and_read(&mut stream, b"*2\r\n$4\r\nINCR\r\n$1\r\nx\r\n").await;
 
   assert_eq!(frame, Frame::Error("ERR invalid command".to_owned()));
 
-  server.abort();
+  stop_server(server).await;
+}
+
+#[tokio::test]
+async fn set_over_tcp_is_appended_to_aof() {
+    let (addr, server, aof_path) = spawn_server("set-aof").await;
+
+    let mut stream = connect_with_retry(&addr).await;
+
+    let reply = send_and_read(
+        &mut stream,
+        b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n",
+    )
+    .await;
+
+    assert_eq!(reply, Frame::Simple("OK".to_owned()));
+
+    stop_server(server).await;
+
+    let bytes = fs::read(&aof_path).unwrap();
+
+    assert_eq!(
+        bytes,
+        b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n"
+    );
 }
