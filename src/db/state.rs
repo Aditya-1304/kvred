@@ -7,6 +7,7 @@ use crate::db::types::Map;
 use crate::db::writer::WriteRequest;
 use crate::db::writer::spawn_writer;
 use crate::persistence::aof::Aof;
+use crate::persistence::replay::replay_into;
 
 
 pub type SharedMap = Arc<Mutex<Map>>;
@@ -19,10 +20,12 @@ pub struct AppState {
 
 pub fn new_app_state(aof_path: impl AsRef<Path>) -> io::Result<AppState> {
 
-let map = Arc::new(Mutex::new(Map::new()));
+  let aof_path = aof_path.as_ref();
+  let mut initial_map = Map::new();
+  replay_into(aof_path, &mut initial_map)?;
+  let map = Arc::new(Mutex::new(initial_map));
   let aof = Aof::open(aof_path)?;
   let write_tx = spawn_writer(map.clone(), aof);
 
   Ok(AppState { map, write_tx })
-
 }
