@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 use crate::db::types::Map;
-use crate::db::writer::WriteRequest;
+use crate::db::writer::WriterMsg;
 use crate::db::writer::spawn_writer;
 use crate::persistence::aof::Aof;
 use crate::persistence::replay::replay_into;
@@ -15,7 +15,7 @@ pub type SharedMap = Arc<Mutex<Map>>;
 #[derive(Clone)]
 pub struct AppState {
   pub map: SharedMap, 
-  pub write_tx: mpsc::Sender<WriteRequest>,
+  pub write_tx: mpsc::Sender<WriterMsg>,
 }
 
 pub fn new_app_state(aof_path: impl AsRef<Path>) -> io::Result<(AppState, tokio::task::JoinHandle<()>)> {

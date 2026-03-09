@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::oneshot};
 
-use crate::{command::{Command, exec::execute, parse::parse}, db::{state::AppState, writer::{WriteOper, WriteRequest}}, protocol::{decode::decode, encode::encode, frame::Frame}, server::shutdown::ShutdownRx};
+use crate::{command::{Command, exec::execute, parse::parse}, db::{state::AppState, writer::{WriteOper, WriteRequest, WriterMsg}}, protocol::{decode::decode, encode::encode, frame::Frame}, server::shutdown::ShutdownRx};
 
 pub async fn handle_connection(stream: TcpStream, state: AppState, mut shutdown: ShutdownRx) -> std::io::Result<()> {
   let mut stream = stream;
@@ -14,7 +14,7 @@ pub async fn handle_connection(stream: TcpStream, state: AppState, mut shutdown:
         return Ok(());
       }
     };
-    
+
     if n == 0 {
       return Ok(());
     }
@@ -43,10 +43,10 @@ pub async fn handle_connection(stream: TcpStream, state: AppState, mut shutdown:
 
           if state
             .write_tx
-            .send(WriteRequest {
+            .send(WriterMsg::Write(WriteRequest {
               operation: WriteOper::Set { key, value },
               response: tx,
-            })
+            }))
             .await
             .is_err()
           {
@@ -64,10 +64,10 @@ pub async fn handle_connection(stream: TcpStream, state: AppState, mut shutdown:
 
           if state
             .write_tx
-            .send(WriteRequest {
+            .send(WriterMsg::Write(WriteRequest {
               operation: WriteOper::Del { keys },
               response: tx,
-            })
+            }))
             .await
             .is_err()
           {
