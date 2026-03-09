@@ -1,9 +1,9 @@
 use bytes::BytesMut;
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::oneshot};
 
-use crate::{command::{Command, exec::execute, parse::parse}, db::state::SharedStore, protocol::{decode::decode, encode::encode, frame::Frame}};
+use crate::{command::{Command, exec::execute, parse::parse}, db::{state::AppState, writer::{WriteOper, WriteRequest}}, protocol::{decode::decode, encode::encode, frame::Frame}};
 
-pub async fn handle_connection(stream: TcpStream, db: SharedStore) -> std::io::Result<()> {
+pub async fn handle_connection(stream: TcpStream, state: AppState) -> std::io::Result<()> {
   let mut stream = stream;
   let mut buffer = BytesMut::with_capacity(4096);
 
@@ -31,17 +31,52 @@ pub async fn handle_connection(stream: TcpStream, db: SharedStore) -> std::io::R
         }
       };
 
-      let reply = {
-        let mut guard = db.lock().unwrap();
+      let reply = match cmd {
+        Command::Set { key, value } => {
+          let (tx, rx) = oneshot::channel();
 
-        if is_mutating(&cmd) {
-          if guard.aof.append_command(&cmd).is_err() {
-            Frame::Error("ERR persistence failure".to_owned())
+          if state
+            .write_tx
+            .send(WriteRequest {
+              operation: WriteOper::Set { key, value },
+              response: tx,
+            })
+            .await
+            .is_err()
+          {
+            Frame::Error("ERR write path unavailable".to_owned())
           } else {
-            execute(cmd, &mut guard.map)
+            match rx.await {
+              Ok(reply) => reply,
+              Err(_) => Frame::Error("ERR write path unavailable".to_owned()),
+            }
           }
-        } else {
-        execute(cmd, &mut guard.map)
+        }
+
+        Command::Del { keys } => {
+          let (tx, rx) = oneshot::channel();
+
+          if state
+            .write_tx
+            .send(WriteRequest {
+              operation: WriteOper::Del { keys },
+              response: tx,
+            })
+            .await
+            .is_err()
+          {
+            Frame::Error("ERR write path unavailable".to_owned())
+          } else {
+            match rx.await {
+              Ok(reply) => reply,
+              Err(_) => Frame::Error("ERR write path unavailable".to_owned()),
+            }
+          }
+        }
+
+        other => {
+          let mut guard = state.map.lock().unwrap();
+          execute(other, &mut guard)
         }
       };
 
@@ -53,6 +88,3 @@ pub async fn handle_connection(stream: TcpStream, db: SharedStore) -> std::io::R
   }
 }
 
-fn is_mutating(cmd: &Command) -> bool {
-  matches!(cmd, Command::Set { .. } | Command::Del { .. })
-}

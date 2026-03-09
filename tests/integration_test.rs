@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
 
 use bytes::{Bytes, BytesMut};
 use kvred::{
-  db::state::new_shared_store,
+  db::state::new_app_state,
   protocol::{decode::decode, frame::Frame},
   server::listener::{ serve},
 };
@@ -24,7 +24,7 @@ fn temp_aof_path(name: &str) -> PathBuf {
 
 async fn spawn_server(name: &str) -> (String, JoinHandle<()>, PathBuf) {
   let aof_path = temp_aof_path(name);
-  let store = new_shared_store(&aof_path).unwrap();
+  let store = new_app_state(&aof_path).unwrap();
 
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
   let addr = listener.local_addr().unwrap().to_string();
@@ -73,7 +73,7 @@ async fn send_and_read(stream: &mut TcpStream, request: &[u8]) -> Frame {
 
 #[tokio::test]
 async fn ping_over_tcp() {
-  let (addr, server, _aof_path) = spawn_server("ping").await;
+  let (addr, server, aof_path) = spawn_server("ping").await;
 
   let mut stream = connect_with_retry(&addr).await;
   let frame = send_and_read(&mut stream, b"*1\r\n$4\r\nPING\r\n").await;
@@ -81,11 +81,12 @@ async fn ping_over_tcp() {
   assert_eq!(frame, Frame::Simple("PONG".to_owned()));
 
   stop_server(server).await;
+  cleanup_aof(aof_path);
 }
 
 #[tokio::test]
 async fn set_then_get_over_tcp() {
-  let (addr, server, _aof_path) = spawn_server("set-get").await;
+  let (addr, server, aof_path) = spawn_server("set-get").await;
 
   let mut stream = connect_with_retry(&addr).await;
 
@@ -105,11 +106,12 @@ async fn set_then_get_over_tcp() {
   assert_eq!(get_reply, Frame::Bulk(Bytes::from_static(b"hello")));
 
   stop_server(server).await;
+  cleanup_aof(aof_path);
 }
 
 #[tokio::test]
 async fn unknown_command_returns_error() {
-  let (addr, server, _aof_path) = spawn_server("unknown").await;
+  let (addr, server, aof_path) = spawn_server("unknown").await;
 
   let mut stream = connect_with_retry(&addr).await;
 
@@ -118,28 +120,67 @@ async fn unknown_command_returns_error() {
   assert_eq!(frame, Frame::Error("ERR invalid command".to_owned()));
 
   stop_server(server).await;
+  cleanup_aof(aof_path);
 }
 
 #[tokio::test]
 async fn set_over_tcp_is_appended_to_aof() {
-    let (addr, server, aof_path) = spawn_server("set-aof").await;
+  let (addr, server, aof_path) = spawn_server("set-aof").await;
 
-    let mut stream = connect_with_retry(&addr).await;
+  let mut stream = connect_with_retry(&addr).await;
 
-    let reply = send_and_read(
-        &mut stream,
-        b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n",
-    )
-    .await;
+  let reply = send_and_read(
+    &mut stream,
+    b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n",
+  )
+  .await;
 
-    assert_eq!(reply, Frame::Simple("OK".to_owned()));
+  assert_eq!(reply, Frame::Simple("OK".to_owned()));
 
-    stop_server(server).await;
+  stop_server(server).await;
 
-    let bytes = fs::read(&aof_path).unwrap();
+  let bytes = fs::read(&aof_path).unwrap();
 
-    assert_eq!(
-        bytes,
-        b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n"
-    );
+  assert_eq!(
+    bytes,
+    b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n"
+  );
+}
+
+fn cleanup_aof(aof_path: PathBuf) {
+  let _ = fs::remove_file(aof_path);
+}
+
+#[tokio::test]
+async fn del_over_tcp_is_appended_to_aof() {
+  let (addr, server, aof_path) = spawn_server("del-aof").await;
+
+  let mut stream = connect_with_retry(&addr).await;
+
+  let set_reply = send_and_read(
+      &mut stream,
+      b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n",
+  )
+  .await;
+
+  let del_reply = send_and_read(
+      &mut stream,
+      b"*2\r\n$3\r\nDEL\r\n$5\r\nmykey\r\n",
+  )
+  .await;
+
+  assert_eq!(set_reply, Frame::Simple("OK".to_owned()));
+  assert_eq!(del_reply, Frame::Integer(1));
+
+  stop_server(server).await;
+
+  let bytes = fs::read(&aof_path).unwrap();
+
+  assert_eq!(
+    bytes,
+    b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n\
+    *2\r\n$3\r\nDEL\r\n$5\r\nmykey\r\n"
+  );
+
+  cleanup_aof(aof_path);
 }
