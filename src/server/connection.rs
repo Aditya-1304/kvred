@@ -1,14 +1,20 @@
 use bytes::BytesMut;
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::oneshot};
 
-use crate::{command::{Command, exec::execute, parse::parse}, db::{state::AppState, writer::{WriteOper, WriteRequest}}, protocol::{decode::decode, encode::encode, frame::Frame}};
+use crate::{command::{Command, exec::execute, parse::parse}, db::{state::AppState, writer::{WriteOper, WriteRequest}}, protocol::{decode::decode, encode::encode, frame::Frame}, server::shutdown::ShutdownRx};
 
-pub async fn handle_connection(stream: TcpStream, state: AppState) -> std::io::Result<()> {
+pub async fn handle_connection(stream: TcpStream, state: AppState, mut shutdown: ShutdownRx) -> std::io::Result<()> {
   let mut stream = stream;
   let mut buffer = BytesMut::with_capacity(4096);
 
   loop {
-    let n = stream.read_buf(&mut buffer).await?;
+    let n = tokio::select! {
+      res = stream.read_buf(&mut buffer) => res?,
+      _ = shutdown.changed() => {
+        return Ok(());
+      }
+    };
+    
     if n == 0 {
       return Ok(());
     }

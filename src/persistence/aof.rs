@@ -29,6 +29,12 @@ impl Aof {
     self.file.sync_all()?;
     Ok(())
   }
+
+  pub fn flush_and_sync(&mut self) -> io::Result<()> {
+    self.file.flush()?;
+    self.file.sync_all()?;
+    Ok(())
+  }
 }
 
 fn command_to_frame(cmd: &Command) -> Option<Frame> {
@@ -51,6 +57,8 @@ fn command_to_frame(cmd: &Command) -> Option<Frame> {
     _ => None
   }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -122,3 +130,4 @@ mod tests {
     let _ = fs::remove_file(path);
   }
 }
+

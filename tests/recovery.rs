@@ -31,7 +31,8 @@ async fn recovery_replays_set_command() {
   })
   .unwrap();
 
-  let state = new_app_state(&path).unwrap();
+  let (state, writer_handle) = new_app_state(&path).unwrap();
+
 
   let guard = state.map.lock().unwrap();
   assert_eq!(
@@ -40,6 +41,8 @@ async fn recovery_replays_set_command() {
   );
 
   drop(guard);
+  drop(state);
+  writer_handle.await.unwrap();
   let _ = fs::remove_file(path);
 }
 
@@ -59,12 +62,15 @@ async fn recovery_replays_set_and_del() {
   })
   .unwrap();
 
-  let state = new_app_state(&path).unwrap();
+  let (state, writer_handle) = new_app_state(&path).unwrap();
+
 
   let guard = state.map.lock().unwrap();
   assert!(guard.get(&Bytes::from_static(b"mykey")).is_none());
 
   drop(guard);
+  drop(state);
+  writer_handle.await.unwrap();
   let _ = fs::remove_file(path);
 }
 
@@ -85,7 +91,8 @@ async fn recovery_preserves_last_value() {
   })
   .unwrap();
 
-  let state = new_app_state(&path).unwrap();
+  let (state, writer_handle) = new_app_state(&path).unwrap();
+
 
   let guard = state.map.lock().unwrap();
   assert_eq!(
@@ -94,5 +101,7 @@ async fn recovery_preserves_last_value() {
   );
 
   drop(guard);
+  drop(state);
+  writer_handle.await.unwrap();
   let _ = fs::remove_file(path);
 }

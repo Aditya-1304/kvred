@@ -18,14 +18,14 @@ pub struct AppState {
   pub write_tx: mpsc::Sender<WriteRequest>,
 }
 
-pub fn new_app_state(aof_path: impl AsRef<Path>) -> io::Result<AppState> {
+pub fn new_app_state(aof_path: impl AsRef<Path>) -> io::Result<(AppState, tokio::task::JoinHandle<()>)> {
 
   let aof_path = aof_path.as_ref();
   let mut initial_map = Map::new();
   replay_into(aof_path, &mut initial_map)?;
   let map = Arc::new(Mutex::new(initial_map));
   let aof = Aof::open(aof_path)?;
-  let write_tx = spawn_writer(map.clone(), aof);
+  let (write_tx, write_handle) = spawn_writer(map.clone(), aof);
 
-  Ok(AppState { map, write_tx })
+  Ok((AppState { map, write_tx }, write_handle))
 }
