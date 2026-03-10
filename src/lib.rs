@@ -1,5 +1,6 @@
-pub mod protocol;
 pub mod command;
+pub mod config;
 pub mod db;
-pub mod server;
 pub mod persistence;
+pub mod protocol;
+pub mod server;

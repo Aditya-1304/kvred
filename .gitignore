@@ -1,3 +1,6 @@
 /target
 /docs
 *.aof
+__pycache__
+/.vscode
+/benchmark*

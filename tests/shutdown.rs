@@ -4,21 +4,34 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bytes::{BytesMut};
+use bytes::BytesMut;
 use kvred::{
-    db::state::new_app_state,
+    config::FsyncPolicy,
+    db::{state::new_app_state, writer::WriterHandles},
     protocol::{decode::decode, frame::Frame},
     server::{
         listener::serve,
-        shutdown::{channel, ShutdownTx},
+        shutdown::{ShutdownTx, channel},
     },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
+
+async fn stop_writer(handles: WriterHandles) {
+    if let Some(stop) = handles.flush_stop {
+        let _ = stop.send(());
+    }
+
+    if let Some(flusher) = handles.flusher {
+        flusher.await.unwrap();
+    }
+
+    handles.writer.await.unwrap();
+}
 
 fn temp_aof_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -34,27 +47,25 @@ async fn spawn_server(
 ) -> (
     String,
     JoinHandle<std::io::Result<()>>,
-    JoinHandle<()>,
+    WriterHandles,
     ShutdownTx,
     PathBuf,
 ) {
     let aof_path = temp_aof_path(name);
-    let (state, writer_handle) = new_app_state(&aof_path).unwrap();
+    let (state, writer_handles) = new_app_state(&aof_path, FsyncPolicy::Always).unwrap();
     let (shutdown_tx, shutdown_rx) = channel();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
 
-    let listener_handle = tokio::spawn(async move {
-        serve(listener, state, shutdown_rx).await
-    });
+    let listener_handle = tokio::spawn(async move { serve(listener, state, shutdown_rx).await });
 
-    (addr, listener_handle, writer_handle, shutdown_tx, aof_path)
+    (addr, listener_handle, writer_handles, shutdown_tx, aof_path)
 }
 
 async fn shutdown_server(
     listener_handle: JoinHandle<std::io::Result<()>>,
-    writer_handle: JoinHandle<()>,
+    writer_handles: WriterHandles,
     shutdown_tx: ShutdownTx,
 ) {
     let _ = shutdown_tx.send(true);
@@ -62,7 +73,7 @@ async fn shutdown_server(
     let listener_result = listener_handle.await.unwrap();
     listener_result.unwrap();
 
-    writer_handle.await.unwrap();
+    stop_writer(writer_handles).await;
 }
 
 async fn connect_with_retry(addr: &str) -> TcpStream {
@@ -84,7 +95,10 @@ async fn read_one_frame(stream: &mut TcpStream) -> Frame {
             Some(frame) => return frame,
             None => {
                 let n = stream.read_buf(&mut buf).await.unwrap();
-                assert!(n != 0, "server closed connection before sending a full frame");
+                assert!(
+                    n != 0,
+                    "server closed connection before sending a full frame"
+                );
             }
         }
     }
@@ -101,7 +115,7 @@ fn cleanup_aof(path: PathBuf) {
 
 #[tokio::test]
 async fn shutdown_preserves_completed_set_in_aof() {
-    let (addr, listener_handle, writer_handle, shutdown_tx, aof_path) =
+    let (addr, listener_handle, writer_handles, shutdown_tx, aof_path) =
         spawn_server("persist-set").await;
 
     let mut stream = connect_with_retry(&addr).await;
@@ -114,23 +128,20 @@ async fn shutdown_preserves_completed_set_in_aof() {
 
     assert_eq!(reply, Frame::Simple("OK".to_owned()));
 
-    shutdown_server(listener_handle, writer_handle, shutdown_tx).await;
+    shutdown_server(listener_handle, writer_handles, shutdown_tx).await;
 
     let bytes = fs::read(&aof_path).unwrap();
-    assert_eq!(
-        bytes,
-        b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n"
-    );
+    assert_eq!(bytes, b"*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$5\r\nhello\r\n");
 
     cleanup_aof(aof_path);
 }
 
 #[tokio::test]
 async fn shutdown_stops_accepting_new_connections() {
-    let (addr, listener_handle, writer_handle, shutdown_tx, aof_path) =
+    let (addr, listener_handle, writer_handles, shutdown_tx, aof_path) =
         spawn_server("stop-accept").await;
 
-    shutdown_server(listener_handle, writer_handle, shutdown_tx).await;
+    shutdown_server(listener_handle, writer_handles, shutdown_tx).await;
 
     let result = TcpStream::connect(&addr).await;
     assert!(result.is_err());
@@ -140,17 +151,17 @@ async fn shutdown_stops_accepting_new_connections() {
 
 #[tokio::test]
 async fn shutdown_closes_idle_connection() {
-    let (addr, listener_handle, writer_handle, shutdown_tx, aof_path) =
+    let (addr, listener_handle, writer_handles, shutdown_tx, aof_path) =
         spawn_server("close-idle").await;
 
     let mut stream = connect_with_retry(&addr).await;
 
-    shutdown_server(listener_handle, writer_handle, shutdown_tx).await;
+    shutdown_server(listener_handle, writer_handles, shutdown_tx).await;
 
     let mut buf = BytesMut::with_capacity(16);
     match stream.read_buf(&mut buf).await {
-      Ok(n) => assert_eq!(n, 0),
-      Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset),
+        Ok(n) => assert_eq!(n, 0),
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::ConnectionReset),
     };
 
     cleanup_aof(aof_path);
